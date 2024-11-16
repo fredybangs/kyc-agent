@@ -9,6 +9,7 @@ import {
   ScrollView,
   Image,
   ActivityIndicator,
+  useColorScheme,
   View,
 } from 'react-native';
 import { useDispatch, useSelector } from 'react-redux';
@@ -17,38 +18,62 @@ import { ThemedView } from '../../../components/ThemedView';
 import { ThemedText } from '../../../components/ThemedText';
 import * as ImagePicker from 'expo-image-picker';
 import DateTimePicker from '@react-native-community/datetimepicker';
-import { useNavigation } from '@react-navigation/native';
 import { Picker } from '@react-native-picker/picker';
 import axios from 'axios';
 import apiConfig from '../../../services/api/config';
-
-
+import { saveKYCOffline } from '../../../features/authentication/auth.slice';
+import { router } from 'expo-router';
 
 export default function CreateApplicationScreen() {
   const dispatch = useDispatch();
-  const navigation = useNavigation();
+  const colorScheme = useColorScheme();
 
-  // Access the accessToken from Redux store
-  const accessToken = useSelector((state) => state.user.userDetails.access_token);
+  const isDarkMode = colorScheme === 'dark';
 
-  // State variables for form fields
+  const styles = makeStyles(isDarkMode);
+
+  const {userDetails} = useSelector((state) => state.user)
+
+  const accessToken = userDetails.access_token
+
+  // Form States
   const [name, setName] = useState('');
   const [login, setLogin] = useState('');
   const [phone, setPhone] = useState('');
+  const [userType, setUserType] = useState(''); 
   const [idType, setIdType] = useState('');
   const [idNumber, setIdNumber] = useState('');
   const [idExpiryDate, setIdExpiryDate] = useState(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [currentAddress, setCurrentAddress] = useState('');
   const [permanentAddress, setPermanentAddress] = useState('');
-  const [idDocument, setIdDocument] = useState(null);
-  const [proofOfAddress, setProofOfAddress] = useState(null);
-  const [selfie, setSelfie] = useState(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Function to validate the form
+  // Image States
+  const [idDocument, setIdDocument] = useState(null);
+  const [idDocumentBase64, setIdDocumentBase64] = useState('');
+  const [proofOfAddress, setProofOfAddress] = useState(null);
+  const [proofOfAddressBase64, setProofOfAddressBase64] = useState('');
+  const [selfie, setSelfie] = useState(null);
+  const [selfieBase64, setSelfieBase64] = useState('');
+
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isSavingOffline, setIsSavingOffline] = useState(false);
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const validateEmail = (email) => {
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/; 
+    return emailPattern.test(email);
+  };
+
+  const validatePhoneNumber = (phone) => {
+    const phonePattern = /^232(31|32|34)\d{6}$/;
+    return phonePattern.test(phone);
+  };
+  
   const validateForm = () => {
-    if (!name || !login || !idType || !idNumber) {
+    if (!name || !phone || !idType || !idNumber || !userType) {
       Alert.alert('Error', 'Please fill in all required fields.');
       return false;
     }
@@ -56,10 +81,25 @@ export default function CreateApplicationScreen() {
       Alert.alert('Error', 'Please upload all required images.');
       return false;
     }
+
+    if(login){
+      if (!validateEmail(login)) {
+        Alert.alert('Invalid Email', 'Please enter a valid email address.');
+        return false;
+      }
+    }
+
+    if (!validatePhoneNumber(phone)) {
+      Alert.alert(
+        'Invalid Phone Number',
+        'Phone Number must start with "232" followed by "31", "32", or "34", and then 6 digits.'
+      );
+      return false;
+    }
     return true;
   };
+  
 
-  // Function to handle form submission
   const handleSubmit = async () => {
     if (!validateForm()) {
       return;
@@ -69,21 +109,20 @@ export default function CreateApplicationScreen() {
     let idDocumentUrl, proofOfAddressUrl, selfieUrl;
 
     try {
-      idDocumentUrl = await uploadToImgbb(idDocument.uri);
-      proofOfAddressUrl = await uploadToImgbb(proofOfAddress.uri);
-      selfieUrl = await uploadToImgbb(selfie.uri);
+      idDocumentUrl = await uploadToImgbb(idDocumentBase64);
+      proofOfAddressUrl = await uploadToImgbb(proofOfAddressBase64);
+      selfieUrl = await uploadToImgbb(selfieBase64);
     } catch (error) {
-      console.log('Image upload error:', error);
       Alert.alert('Error', 'Failed to upload images.');
       setIsSubmitting(false);
       return;
     }
 
-    // Prepare the data
     const data = {
       name,
       login,
       phone,
+      user_type: userType,
       id_type: idType,
       id_number: idNumber,
       id_expiry_date: idExpiryDate.toISOString().split('T')[0],
@@ -95,32 +134,67 @@ export default function CreateApplicationScreen() {
     };
 
     try {
-        const response = await axios.post(`${apiConfig.url}/api/kyc/create`, data,{
-            headers: {
-                'Content-Type': 'text/html',
-                'ClientID': '12345',
-                'accessToken': accessToken
-            }
-        });
+      const response = await axios.post(`${apiConfig.url}/api/kyc/create`, data, {
+        headers: {
+          'Content-Type': 'text/html',
+          'clientId': '12345',
+          'accessToken': accessToken,
+        },
+      });
 
-      if (response.status) {
+      let res = response.data;
+
+      if (res.intent) {
         Alert.alert('Success', 'KYC Application created successfully.');
-        // Navigate back to the home screen or refresh the list
-        // navigation.goBack();
+        router.back()
       } else {
-        const errorData = await response.json();
-        Alert.alert('Error', errorData.message || 'An error occurred.');
+        Alert.alert('Error', res.message || 'An error occurred.');
       }
     } catch (error) {
       Alert.alert('Error', 'An error occurred while creating the application.');
-      console.error(error);
+      console.error('Submit Error:', error);
     } finally {
       setIsSubmitting(false);
     }
   };
 
+  const handleSaveOffline = () => {
+    if (!validateForm()) {
+      return;
+    }
+
+    setIsSavingOffline(true);
+
+    const offlineData = {
+      name,
+      login,
+      phone,
+      user_type: userType,
+      id_type: idType,
+      id_number: idNumber,
+      id_expiry_date: idExpiryDate.toISOString().split('T')[0],
+      id_document_base64: idDocumentBase64,
+      proof_of_address_base64: proofOfAddressBase64,
+      selfie_base64: selfieBase64,
+      current_address: currentAddress,
+      permanent_address: permanentAddress,
+      timestamp: new Date().toISOString(),
+    };
+
+    try {
+      dispatch(saveKYCOffline(offlineData));
+      Alert.alert('Success', 'KYC Application saved offline.');
+      router.back()
+    } catch (error) {
+      Alert.alert('Error', 'Failed to save the application offline.');
+      console.error('Save Offline Error:', error);
+    } finally {
+      setIsSavingOffline(false);
+    }
+  };
+
   // Function to pick images
-  const pickImage = async (setter) => {
+  const pickImage = async (setter, setBase64) => {
     const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
 
     if (!permissionResult.granted) {
@@ -132,15 +206,17 @@ export default function CreateApplicationScreen() {
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       allowsEditing: true,
       quality: 0.5,
+      base64: true,
     });
 
     if (!pickerResult.cancelled && pickerResult.assets && pickerResult.assets.length > 0) {
       setter(pickerResult.assets[0]);
+      setBase64(pickerResult.assets[0].base64);
     }
   };
 
   // Function to take photos
-  const takePhoto = async (setter) => {
+  const takePhoto = async (setter, setBase64) => {
     const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
 
     if (!permissionResult.granted) {
@@ -152,29 +228,24 @@ export default function CreateApplicationScreen() {
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
       allowsEditing: true,
       quality: 0.5,
+      base64: true, 
     });
 
     if (!pickerResult.cancelled && pickerResult.assets && pickerResult.assets.length > 0) {
       setter(pickerResult.assets[0]);
+      setBase64(pickerResult.assets[0].base64);
     }
   };
 
-  // Function to upload images to ImgBB
-  const uploadToImgbb = async (uri) => {
-    const IMGBB_API_KEY = 'b03bfa94ee382d828ab3da67e813a97a'; // Replace with your ImgBB API key
+  // Function to upload images to ImgBB using base64 strings
+  const uploadToImgbb = async (base64Image) => {
+    const IMGBB_API_KEY = 'b03bfa94ee382d828ab3da67e813a97a'; 
 
     try {
-      const response = await fetch(uri);
-      const blob = await response.blob();
-
-      const base64Image = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result.split(',').pop());
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-
-      const formBody = `key=${encodeURIComponent(IMGBB_API_KEY)}&image=${encodeURIComponent(base64Image)}`;
+      const formBody = new URLSearchParams({
+        key: IMGBB_API_KEY,
+        image: base64Image,
+      }).toString();
 
       const uploadResponse = await fetch('https://api.imgbb.com/1/upload', {
         method: 'POST',
@@ -201,26 +272,38 @@ export default function CreateApplicationScreen() {
     <ThemedView style={styles.container}>
       {/* App Bar */}
       <Appbar.Header style={styles.header}>
-        <Appbar.BackAction onPress={() => navigation.goBack()} />
+        <Appbar.BackAction onPress={() => router.back()}  />
         <Appbar.Content title="Create Application" titleStyle={styles.headerTitle} />
       </Appbar.Header>
 
       <ScrollView contentContainerStyle={styles.content}>
-        <ThemedText style={styles.title}>Create New KYC Application</ThemedText>
 
         {/* Personal Information */}
-        <View style={styles.section}>
+        <ThemedView style={styles.section}>
+          {/* User Type Picker */}
+          <ThemedView style={styles.pickerContainer}>
+            <Picker
+              selectedValue={userType}
+              onValueChange={(itemValue) => setUserType(itemValue)}
+              style={styles.picker}
+            >
+              <Picker.Item label="Select User Type" value="" />
+              <Picker.Item label="Existing Subscriber" value="existing" />
+              <Picker.Item label="New Subscriber" value="new" />
+            </Picker>
+          </ThemedView>
+
           <ThemedText style={styles.sectionTitle}>Personal Information</ThemedText>
           <TextInput
             style={styles.input}
-            placeholder="Full Name *"
+            placeholder="Full Name"
             value={name}
             onChangeText={setName}
             placeholderTextColor="#aaa"
           />
           <TextInput
             style={styles.input}
-            placeholder="Email *"
+            placeholder="Email"
             value={login}
             onChangeText={setLogin}
             keyboardType="email-address"
@@ -235,10 +318,10 @@ export default function CreateApplicationScreen() {
             keyboardType="phone-pad"
             placeholderTextColor="#aaa"
           />
-        </View>
+        </ThemedView>
 
         {/* Address Information */}
-        <View style={styles.section}>
+        <ThemedView style={styles.section}>
           <ThemedText style={styles.sectionTitle}>Address Information</ThemedText>
           <TextInput
             style={styles.input}
@@ -254,32 +337,31 @@ export default function CreateApplicationScreen() {
             onChangeText={setPermanentAddress}
             placeholderTextColor="#aaa"
           />
-        </View>
+        </ThemedView>
 
         {/* ID Information */}
-        <View style={styles.section}>
+        <ThemedView style={styles.section}>
           <ThemedText style={styles.sectionTitle}>Identification Information</ThemedText>
-          <View style={styles.pickerContainer}>
+          <ThemedView style={styles.pickerContainer}>
             <Picker
               selectedValue={idType}
               onValueChange={(itemValue) => setIdType(itemValue)}
               style={styles.picker}
             >
-              <Picker.Item label="Select ID Type *" value="" />
+              <Picker.Item label="Select ID Type" value="" />
               <Picker.Item label="National ID" value="national_id" />
               <Picker.Item label="Passport" value="passport" />
               <Picker.Item label="Driver License" value="driver_license" />
               <Picker.Item label="Voter ID" value="voter_id" />
             </Picker>
-          </View>
+          </ThemedView>
           <TextInput
             style={styles.input}
-            placeholder="ID Number *"
+            placeholder="ID Number"
             value={idNumber}
             onChangeText={setIdNumber}
             placeholderTextColor="#aaa"
           />
-          {/* Date Picker for ID Expiration Date */}
           <TouchableOpacity
             style={styles.datePickerButton}
             onPress={() => setShowDatePicker(true)}
@@ -293,6 +375,7 @@ export default function CreateApplicationScreen() {
               value={idExpiryDate}
               mode="date"
               display="default"
+              minimumDate={today}
               onChange={(event, selectedDate) => {
                 setShowDatePicker(false);
                 if (selectedDate) {
@@ -301,85 +384,99 @@ export default function CreateApplicationScreen() {
               }}
             />
           )}
-        </View>
+        </ThemedView>
 
         {/* Upload Documents */}
-        <View style={styles.section}>
+        <ThemedView style={styles.section}>
           <ThemedText style={styles.sectionTitle}>Upload Documents</ThemedText>
 
           {/* ID Document */}
-          <View style={styles.documentContainer}>
-            <ThemedText style={styles.documentLabel}>ID Document *</ThemedText>
-            <View style={styles.buttonRow}>
+          <ThemedView style={styles.documentContainer}>
+            <ThemedText style={styles.documentLabel}>ID Document</ThemedText>
+            <ThemedView style={styles.buttonRow}>
               <TouchableOpacity
                 style={styles.actionButton}
-                onPress={() => takePhoto(setIdDocument)}
+                onPress={() => takePhoto(setIdDocument, setIdDocumentBase64)}
               >
                 <ThemedText style={styles.actionButtonText}>Take Photo</ThemedText>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.actionButton}
-                onPress={() => pickImage(setIdDocument)}
+                onPress={() => pickImage(setIdDocument, setIdDocumentBase64)}
               >
                 <ThemedText style={styles.actionButtonText}>Choose from Library</ThemedText>
               </TouchableOpacity>
-            </View>
+            </ThemedView>
             {idDocument && (
               <Image source={{ uri: idDocument.uri }} style={styles.imagePreview} />
             )}
-          </View>
+          </ThemedView>
 
           {/* Proof of Address */}
-          <View style={styles.documentContainer}>
-            <ThemedText style={styles.documentLabel}>Proof of Address *</ThemedText>
-            <View style={styles.buttonRow}>
+          <ThemedView style={styles.documentContainer}>
+            <ThemedText style={styles.documentLabel}>Proof of Address</ThemedText>
+            <ThemedView style={styles.buttonRow}>
               <TouchableOpacity
                 style={styles.actionButton}
-                onPress={() => takePhoto(setProofOfAddress)}
+                onPress={() => takePhoto(setProofOfAddress, setProofOfAddressBase64)}
               >
                 <ThemedText style={styles.actionButtonText}>Take Photo</ThemedText>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.actionButton}
-                onPress={() => pickImage(setProofOfAddress)}
+                onPress={() => pickImage(setProofOfAddress, setProofOfAddressBase64)}
               >
                 <ThemedText style={styles.actionButtonText}>Choose from Library</ThemedText>
               </TouchableOpacity>
-            </View>
+            </ThemedView>
             {proofOfAddress && (
               <Image source={{ uri: proofOfAddress.uri }} style={styles.imagePreview} />
             )}
-          </View>
+          </ThemedView>
 
-          {/* Selfie */}
-          <View style={styles.documentContainer}>
-            <ThemedText style={styles.documentLabel}>Selfie *</ThemedText>
-            <View style={styles.buttonRow}>
+          {/* User Image */}
+          <ThemedView style={styles.documentContainer}>
+            <ThemedText style={styles.documentLabel}>User Photo</ThemedText>
               <TouchableOpacity
                 style={styles.actionButton}
-                onPress={() => takePhoto(setSelfie)}
+                onPress={() => takePhoto(setSelfie, setSelfieBase64)}
               >
                 <ThemedText style={styles.actionButtonText}>Take Photo</ThemedText>
               </TouchableOpacity>
-            </View>
             {selfie && (
               <Image source={{ uri: selfie.uri }} style={styles.imagePreview} />
             )}
-          </View>
-        </View>
+          </ThemedView>
+        </ThemedView>
 
-        {/* Submit Button */}
-        <TouchableOpacity
-          style={styles.submitButton}
-          onPress={handleSubmit}
-          disabled={isSubmitting}
-        >
-          {isSubmitting ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <ThemedText style={styles.submitButtonText}>Submit Application</ThemedText>
-          )}
-        </TouchableOpacity>
+        {/* Action Buttons */}
+        <View style={styles.buttonContainer}>
+          {/* Submit Button */}
+          <TouchableOpacity
+            style={styles.submitButton}
+            onPress={handleSubmit}
+            disabled={isSubmitting}
+          >
+            {isSubmitting ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <ThemedText style={styles.submitButtonText}>Submit Application</ThemedText>
+            )}
+          </TouchableOpacity>
+
+          {/* Save Offline Button */}
+          <TouchableOpacity
+            style={styles.saveOfflineButton}
+            onPress={handleSaveOffline}
+            disabled={isSavingOffline}
+          >
+            {isSavingOffline ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <ThemedText style={styles.saveOfflineButtonText}>Save Offline</ThemedText>
+            )}
+          </TouchableOpacity>
+        </View>
       </ScrollView>
     </ThemedView>
   );
@@ -387,120 +484,129 @@ export default function CreateApplicationScreen() {
 
 const primaryColor = '#F58F21';
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#FFFFFF',
-  },
-  header: {
-    backgroundColor: primaryColor,
-    elevation: 4,
-  },
-  headerTitle: {
-    color: '#fff',
-    fontSize: 20,
-    fontWeight: '600',
-  },
-  content: {
-    paddingHorizontal: 20,
-    paddingBottom: 20,
-  },
-  title: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: '#333333',
-    textAlign: 'center',
-    marginVertical: 20,
-  },
-  section: {
-    marginBottom: 25,
-  },
-  sectionTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    marginBottom: 15,
-    color: '#333',
-  },
-  input: {
-    height: 50,
-    borderColor: '#ddd',
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingHorizontal: 15,
-    marginBottom: 15,
-    fontSize: 16,
-    backgroundColor: '#fff',
-    color: '#333',
-  },
-  pickerContainer: {
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 8,
-    overflow: 'hidden',
-    backgroundColor: '#fff',
-    marginBottom: 15,
-  },
-  picker: {
-    height: 50,
-    width: '100%',
-  },
-  datePickerButton: {
-    height: 50,
-    borderColor: '#ddd',
-    borderWidth: 1,
-    borderRadius: 8,
-    justifyContent: 'center',
-    paddingHorizontal: 15,
-    marginBottom: 15,
-    backgroundColor: '#fff',
-  },
-  datePickerButtonText: {
-    fontSize: 16,
-    color: '#333',
-  },
-  documentContainer: {
-    marginBottom: 20,
-  },
-  documentLabel: {
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 10,
-    color: '#555',
-  },
-  buttonRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 10,
-  },
-  actionButton: {
-    backgroundColor: primaryColor,
-    paddingVertical: 10,
-    paddingHorizontal: 15,
-    borderRadius: 5,
-    alignItems: 'center',
-    flex: 0.48,
-  },
-  actionButtonText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  imagePreview: {
-    width: '100%',
-    height: 200,
-    borderRadius: 8,
-    resizeMode: 'cover',
-  },
-  submitButton: {
-    backgroundColor: primaryColor,
-    paddingVertical: 15,
-    borderRadius: 10,
-    alignItems: 'center',
-    marginBottom: 80,
-  },
-  submitButtonText: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: 'bold',
-  },
-});
+const makeStyles = (isDarkMode) =>
+  StyleSheet.create({
+    container: {
+      flex: 1,
+    },
+    header: {
+      backgroundColor: primaryColor,
+      elevation: 4,
+    },
+    headerTitle: {
+      color: '#fff',
+      fontSize: 20,
+      fontWeight: '600',
+    },
+    content: {
+      paddingHorizontal: 20,
+      paddingBottom: 20,
+      marginTop: 20,
+    },
+    section: {
+      marginBottom: 25,
+    },
+    sectionTitle: {
+      fontSize: 20,
+      fontWeight: 'bold',
+      marginBottom: 15,
+    },
+    input: {
+      height: 50,
+      borderWidth: 1,
+      borderRadius: 8,
+      paddingHorizontal: 15,
+      marginBottom: 15,
+      fontSize: 16,
+      borderColor: '#ddd',
+      color: isDarkMode ? '#FFFFFF' : '#000000',
+    },
+    pickerContainer: {
+      borderWidth: 1,
+      borderColor: '#ddd',
+      borderRadius: 8,
+      overflow: 'hidden',
+      marginBottom: 15,
+    },
+    picker: {
+      height: 50,
+      width: '100%',
+      color: isDarkMode ? '#FFFFFF' : '#000000',
+    },
+    datePickerButton: {
+      height: 50,
+      borderColor: '#ddd',
+      borderWidth: 1,
+      borderRadius: 8,
+      justifyContent: 'center',
+      paddingHorizontal: 15,
+      marginBottom: 15,
+    },
+    datePickerButtonText: {
+      fontSize: 16,
+      color: isDarkMode ? '#FFFFFF' : '#000000',
+    },
+    documentContainer: {
+      marginBottom: 20,
+    },
+    documentLabel: {
+      fontSize: 16,
+      fontWeight: '600',
+      marginBottom: 10,
+    },
+    buttonRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      marginBottom: 10,
+    },
+    actionButton: {
+      backgroundColor: primaryColor,
+      paddingVertical: 10,
+      paddingHorizontal: 15,
+      borderRadius: 5,
+      alignItems: 'center',
+      flex: 0.48,
+      marginBottom: 10,
+    },
+    actionButtonText: {
+      color: '#fff',
+      fontSize: 14,
+      fontWeight: '500',
+    },
+    imagePreview: {
+      width: '100%',
+      height: 200,
+      borderRadius: 8,
+      resizeMode: 'cover',
+    },
+    buttonContainer: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      marginTop: 20,
+      marginBottom: 80,
+    },
+    submitButton: {
+      backgroundColor: primaryColor,
+      paddingVertical: 15,
+      borderRadius: 10,
+      alignItems: 'center',
+      flex: 0.48,
+    },
+    submitButtonText: {
+      color: '#fff',
+      fontSize: 18,
+      fontWeight: 'bold',
+    },
+    saveOfflineButton: {
+      backgroundColor: '#6c757d',
+      paddingVertical: 15,
+      borderRadius: 10,
+      alignItems: 'center',
+      flex: 0.48,
+    },
+    saveOfflineButtonText: {
+      color: '#fff',
+      fontSize: 18,
+      fontWeight: 'bold',
+    },
+  });
